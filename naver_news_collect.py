@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 import os
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import trafilatura
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -331,8 +331,10 @@ def keyword_in_article(keyword: str, art: dict) -> bool:
 
 # ── 수집 ──────────────────────────────────────────────
 
-def fetch_articles(keyword: str, max_pages: int = MAX_PAGES) -> dict:
+def fetch_articles(keyword: str, max_pages: int = MAX_PAGES, days_back: int = 1) -> dict:
     """페이지 순회 수집 후 유사도 기반 최종 중복 제거.
+    days_back: 수집 대상 기간(일). 1이면 최근 24시간, 2 이상이면 그만큼의 기간을 수집
+    (월요일에 주말 동안의 기사를 놓치지 않기 위해 사용).
     반환: {"articles": [...], "removed": [...]}
     """
     raw = []
@@ -340,7 +342,7 @@ def fetch_articles(keyword: str, max_pages: int = MAX_PAGES) -> dict:
 
     for page in range(max_pages):
         start = page * 10 + 1
-        url = make_search_url(keyword, start)
+        url = make_search_url(keyword, start, days_back=days_back)
         print(f"  [페이지 {page + 1}] 요청 중...")
 
         try:
@@ -378,13 +380,19 @@ def fetch_articles(keyword: str, max_pages: int = MAX_PAGES) -> dict:
     return {"articles": articles, "removed": removed}
 
 
-def make_search_url(keyword: str, start: int = 1) -> str:
+def make_search_url(keyword: str, start: int = 1, days_back: int = 1) -> str:
     import urllib.parse
     q = urllib.parse.quote(keyword)
+    if days_back <= 1:
+        period = "p%3A1d"
+    else:
+        end = datetime.now()
+        begin = end - timedelta(days=days_back)
+        period = f"p%3Afrom{begin.strftime('%Y%m%d')}to{end.strftime('%Y%m%d')}"
     return (
         "https://search.naver.com/search.naver"
         f"?ssc=tab.news.all&query={q}"
-        "&sm=tab_opt&sort=0&pd=4&nso=so%3Ar%2Cp%3A1d"
+        f"&sm=tab_opt&sort=0&pd=4&nso=so%3Ar%2C{period}"
         f"&start={start}"
     )
 
@@ -429,14 +437,14 @@ def save_results(folder_name: str, keyword_label: str, result: dict) -> str:
     return txt_path
 
 
-def run_single_keyword(keyword: str) -> dict:
+def run_single_keyword(keyword: str, days_back: int = 1) -> dict:
     """단일 키워드 수집 후 결과 반환 (folder_name, keyword_label, result)"""
     print(f"▶ 키워드: '{keyword}'")
-    result = fetch_articles(keyword)
+    result = fetch_articles(keyword, days_back=days_back)
     return {"folder_name": keyword, "keyword_label": keyword, "result": result}
 
 
-def run_grouped_keywords(group: dict) -> dict:
+def run_grouped_keywords(group: dict, days_back: int = 1) -> dict:
     """그룹 키워드: 여러 검색어를 수집해 하나의 폴더로 합산"""
     folder_name = group["folder"]
     keywords = group["keywords"]
@@ -448,7 +456,7 @@ def run_grouped_keywords(group: dict) -> dict:
 
     for kw in keywords:
         print(f"  검색어: '{kw}'")
-        result = fetch_articles(kw)
+        result = fetch_articles(kw, days_back=days_back)
         for art in result["articles"]:
             if art["link"] not in seen_links:
                 seen_links.add(art["link"])
@@ -469,17 +477,20 @@ def run_grouped_keywords(group: dict) -> dict:
 
 def main():
     os.makedirs(OUTPUT_BASE, exist_ok=True)
-    print(f"수집 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    now = datetime.now()
+    # 월요일(weekday()==0)에는 주말 이틀치를 놓치지 않도록 최근 3일(금~월)을 수집
+    days_back = 3 if now.weekday() == 0 else 1
+    print(f"수집 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} (수집 범위: 최근 {days_back}일)\n")
 
     for entry in KEYWORDS:
         if isinstance(entry, dict):
-            item = run_grouped_keywords(entry)
+            item = run_grouped_keywords(entry, days_back=days_back)
         else:
-            item = run_single_keyword(entry)
+            item = run_single_keyword(entry, days_back=days_back)
 
         articles = item["result"]["articles"]
         if not articles:
-            print("  24시간 이내 관련 기사가 없습니다. 스킵.\n")
+            print(f"  최근 {days_back}일 이내 관련 기사가 없습니다. 스킵.\n")
             continue
 
         path = save_results(item["folder_name"], item["keyword_label"], item["result"])
